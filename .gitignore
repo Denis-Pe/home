@@ -1,0 +1,10 @@
+*
+
+!.gitignore
+!.xinitrc
+!.fehbg
+!.bash_aliases
+!.home-maintenance/setup.sh
+!.config/redshift.conf
+!.config/picom
+!.config/lazygit
