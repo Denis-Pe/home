@@ -4,7 +4,7 @@ sudo apt update
 
 # apt essentials
 
-sudo apt install -y xorg lazygit redshift qalc dunst feh picom qutebrowser python3 make clang gcc ninja-build gettext cmake curl build-essential
+sudo apt install -y xorg lazygit redshift qalc dunst feh picom qutebrowser python3 make clang gcc ninja-build gettext cmake curl build-essential libx11-dev libxft-dev libxinerama-dev
 
 # cmatrix
 
