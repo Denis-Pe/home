@@ -1,2 +1,2 @@
 #!/bin/sh
-feh --no-fehbg --bg-scale '/home/denis/Pictures/Wallpapers/daniel lions.png' 
+feh --no-fehbg --bg-scale ~/Pictures/Wallpapers/active 
