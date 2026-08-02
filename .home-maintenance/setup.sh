@@ -15,23 +15,42 @@ fi
 
 # dwm
 
-git clone https://github.com/Denis-Pe/dwm.git ~/sources/dwm && \
-  cd ~/sources/dwm && \
-  sudo make clean install && \
-  echo "dwm installed" && \
-  sleep 5s
+if ! command -v dwm &> /dev/null; then
+  git clone https://github.com/Denis-Pe/dwm.git ~/sources/dwm && \
+    cd ~/sources/dwm && \
+    sudo make clean install && \
+    echo "dwm freshly installed" && \
+    sleep 5s
+fi
 
 # dmenu
 
-git clone https://github.com/Denis-Pe/dmenu.git ~/sources/dmenu && \
-  cd ~/sources/dmenu && \
-  sudo make clean install && \
-  echo "dmenu installed" && \
-  sleep 5s
+if ! command -v dmenu &> /dev/null; then
+  sudo rm -rf ~/sources/dmenu
+  git clone https://github.com/Denis-Pe/dmenu.git ~/sources/dmenu && \
+    cd ~/sources/dmenu && \
+    sudo make clean install && \
+    echo "dmenu freshly installed" && \
+    sleep 5s
+fi
+
+# st
+
+if ! command -v st &> /dev/null; then
+  sudo rm -rf ~/sources/st
+  git clone https://github.com/Denis-Pe/st.git ~/sources/st && \
+    cd ~/sources/st && \
+    sudo make clean install && \
+    echo "st freshly installed" && \
+    sleep 5s
+fi
 
 # neovim
 
-git clone https://github.com/neovim/neovim.git ~/sources/neovim && \
-  cd ~/sources/neovim &&  \
-  make CMAKE_BUILD_TYPE=RelWithDebInfo && \
-  cd build && cpack -G DEB && sudo dpkg -i nvim-linux-x86_64.deb
+if ! command -v nvim &> /dev/null  ||  ! nvim -v | grep 0.11 &> /dev/null; then
+  sudo rm -rf ~/sources/neovim/
+  git clone -b release-0.11 --single-branch https://github.com/neovim/neovim.git ~/sources/neovim && \
+    cd ~/sources/neovim &&  \
+    make CMAKE_BUILD_TYPE=RelWithDebInfo && \
+    cd build && cpack -G DEB && sudo dpkg -i nvim-linux-x86_64.deb
+fi
