@@ -4,7 +4,7 @@ sudo apt update
 
 # apt essentials
 
-sudo apt install -y xorg lazygit redshift qalc dunst feh picom qutebrowser python3 make clang gcc ninja-build gettext cmake curl build-essential libx11-dev libxft-dev libxinerama-dev
+sudo apt install -y xorg lazygit redshift qalc dunst feh picom qutebrowser python3 make clang gcc ninja-build gettext cmake curl build-essential libx11-dev libxft-dev libxinerama-dev unzip
 
 # cmatrix
 
@@ -53,4 +53,17 @@ if ! command -v nvim &> /dev/null  ||  ! nvim -v | grep 0.11 &> /dev/null; then
     cd ~/sources/neovim &&  \
     make CMAKE_BUILD_TYPE=RelWithDebInfo && \
     cd build && cpack -G DEB && sudo dpkg -i nvim-linux-x86_64.deb
+fi
+
+# fonts
+
+mkdir ~/.fonts
+cd ~/.fonts
+
+if ! ls | grep JetBrainsMonoNerdFont; then
+  curl https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip && \
+    mkdir ~/.fonts && \
+    unzip JetBrainsMono.zip .fonts && \
+    echo "JetBrainsMono freshly installed" && \
+    sleep 5s
 fi
