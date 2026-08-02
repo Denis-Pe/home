@@ -8,8 +8,7 @@ sudo apt install -y xorg lazygit redshift qalc dunst feh picom qutebrowser pytho
 
 # cmatrix
 
-if command -v cmatrix &> /dev/null; then
-else
+if ! command -v cmatrix &> /dev/null; then
   sudo curl -L https://raw.githubusercontent.com/will8211/unimatrix/master/unimatrix.py -o /usr/local/bin/unimatrix
   sudo chmod a+rx /usr/local/bin/unimatrix
 fi
