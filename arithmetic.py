@@ -1,17 +1,30 @@
 #!/bin/python3
+"""Mental-math drills for quant interview prep.
 
-from functools import *
-import signal
-import os
-import sys
-import time
-from dataclasses import dataclass
-import datetime as dt
-import random
+Every answer is appended to RESPONSE_PATH as CSV, so progress can be analysed later.
+Inside a drill, type "back" to return to the menu, "clear" to clear the screen
+or "quit" to exit. Ctrl+C / Ctrl+D also exit and print a session summary.
+"""
+
 import csv
+import datetime as dt
+import operator
+import os
+import random
+import signal
+import time
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from fractions import Fraction
+from functools import reduce
 from pathlib import Path
 
-RESPONSE_PATH = "~/arithmetic.csv"
+RESPONSE_PATH = Path("~/arithmetic.csv").expanduser()
+CSV_HEADER = ["problem_type", "prompt", "right_answer", "user_answer", "delay_seconds", "timestamp", "correct"]
+
+Config = dict[str, object]
+Number = Fraction | float
 
 
 @dataclass
@@ -25,184 +38,291 @@ class Response:
     correct: bool
 
 
-_shutting_down = False
+@dataclass(frozen=True)
+class Problem:
+    prompt: str
+    answer: Number
+    tolerance: float = 0.0  # relative error allowed; 0 means the answer must be exact
+    tag: str | None = None  # overrides the mode's tag (used by mixed mode)
 
-all_responses: list[Response] = []
-
-
-def shutdown(signum=None, frame=None):
-    global _shutting_down
-
-    if _shutting_down:
-        return
-
-    _shutting_down = True
-    print("\nShutting down...")
-    path = os.path.expanduser(RESPONSE_PATH)
-
-    try:
-        with open(path, "a") as f:
-            writer = csv.writer(f)
-            if os.path.exists(path) and os.path.getsize(path) == 0:
-                writer.writerow(
-                    ["problem_type", "prompt", "right_answer", "user_answer", "delay_seconds", "timestamp", "correct"])
-            for response in all_responses:
-                writer.writerow([response.problem_type, response.prompt, response.right_answer, response.user_answer,
-                                 response.delay_seconds, response.timestamp, response.correct])
-
-        print(f"Done writing responses to {path}")
-    finally:
-        sys.stdout.flush()
-        raise SystemExit(0)
+    def check(self, guess: Fraction) -> bool:
+        if self.tolerance == 0:
+            return guess == self.answer
+        return abs(float(guess) - float(self.answer)) <= self.tolerance * abs(float(self.answer))
 
 
-def handle_signals():
-    signal.signal(signal.SIGINT, shutdown)  # Ctrl+C
-    signal.signal(signal.SIGTERM, shutdown)  # kill / service-manager shutdown
+@dataclass(frozen=True)
+class Setting:
+    key: str
+    label: str
+    default: object | Callable[[Config], object]  # may depend on earlier settings
+    parse: Callable[[str], object] = int
+    valid: Callable[[object, Config], bool] = lambda value, cfg: value >= 1
 
-    if hasattr(signal, "SIGHUP"):
-        signal.signal(signal.SIGHUP, shutdown)
+    def default_for(self, cfg: Config) -> object:
+        return self.default(cfg) if callable(self.default) else self.default
 
 
-def rannum(digits):
+@dataclass(frozen=True)
+class Mode:
+    key: str
+    name: str
+    tag: str
+    generate: Callable[[Config], Problem]
+    settings: tuple[Setting, ...] = ()
+
+    def default_config(self) -> Config:
+        cfg: Config = {}
+        for setting in self.settings:
+            cfg[setting.key] = setting.default_for(cfg)
+        return cfg
+
+
+session: list[Response] = []
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def rannum(digits: int) -> int:
     return random.randint(10 ** (digits - 1), 10 ** digits - 1)
 
 
-def multiplication():
-    global all_responses
-    min_digits = None
-    max_digits = None
-    noperands = None
-    print("Multiplication mode engaged!")
-    print("Enter minimum digits for each operand (default 2 if blank):")
-    min_digits = input("> ")
-    if min_digits == "":
-        min_digits = 2
-    else:
-        try:
-            min_digits = int(min_digits)
-        except ValueError:
-            print("Invalid input. Using default value of 2.")
-            min_digits = 2
-    print("")
-    print("Enter maximum digits for each operand (default same as minimum if blank):")
-    max_digits = input("> ")
-    if max_digits == "":
-        max_digits = min_digits
-    else:
-        try:
-            max_digits = int(max_digits)
-            if max_digits < min_digits:
-                print(f"Invalid input. Using default value of {min_digits}.")
-                max_digits = min_digits
-        except ValueError:
-            print(f"Invalid input. Using default value of {min_digits}.")
-            max_digits = min_digits
-    print("")
-    print("Enter number of operands (default 2 if blank):")
-    noperands = input("> ")
-    if noperands == "":
-        noperands = 2
-    else:
-        try:
-            noperands = int(noperands)
-            if noperands < 2:
-                print(f"Invalid input. Using default value of {2}.")
-                noperands = 2
-        except ValueError:
-            print(f"Invalid input. Using default value of {min_digits}.")
-            noperands = 2
+def draw(cfg: Config, name: str) -> int:
+    """Random number whose digit count lies in the configured range for `name`."""
+    return rannum(random.randint(cfg[f"{name}_min"], cfg[f"{name}_max"]))
 
-    response = ""
+
+def fmt(x: Number) -> str:
+    if isinstance(x, Fraction):
+        # Exact answers here always have terminating decimal expansions.
+        return str(x.numerator) if x.denominator == 1 else str(float(x))
+    return f"{x:.4f}".rstrip("0").rstrip(".")
+
+
+def parse_answer(raw: str) -> Fraction:
+    cleaned = raw.replace(",", "").replace("_", "")
+    if not cleaned or "/" in cleaned:  # no typing "3/7" back in fraction mode
+        raise ValueError(raw)
+    return Fraction(cleaned)
+
+
+SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+def digits(name: str, label: str, default: int) -> tuple[Setting, Setting]:
+    return (
+        Setting(f"{name}_min", f"Minimum digits for {label}", default),
+        Setting(f"{name}_max", f"Maximum digits for {label}", lambda cfg: cfg[f"{name}_min"],
+                valid=lambda value, cfg: value >= cfg[f"{name}_min"]),
+    )
+
+
+def tolerance(default: float) -> Setting:
+    return Setting("tolerance", "Allowed relative error in percent", default,
+                   parse=float, valid=lambda value, cfg: value >= 0)
+
+
+def operand_settings(default_digits: int) -> tuple[Setting, ...]:
+    return (
+        *digits("operand", "each operand", default_digits),
+        Setting("operands", "Number of operands", 2, valid=lambda value, cfg: value >= 2),
+        Setting("decimals", "Decimal places per operand", 0, valid=lambda value, cfg: value >= 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Problem generators
+# ---------------------------------------------------------------------------
+
+def chain(symbol: str, op: Callable[[Fraction, Fraction], Fraction]) -> Callable[[Config], Problem]:
+    """Generator for `a op b op c ...` problems, evaluated left to right."""
+
+    def generate(cfg: Config) -> Problem:
+        scale = 10 ** cfg["decimals"]
+        nums = [Fraction(draw(cfg, "operand"), scale) for _ in range(cfg["operands"])]
+        return Problem(f" {symbol} ".join(map(fmt, nums)), reduce(op, nums))
+
+    return generate
+
+
+def division(cfg: Config) -> Problem:
+    divisor, quotient = 1, draw(cfg, "quotient")
+    while divisor == 1:  # dividing by one isn't practice
+        divisor = draw(cfg, "divisor")
+    return Problem(f"{divisor * quotient} ÷ {divisor}", Fraction(quotient))
+
+
+def power(cfg: Config) -> Problem:
+    base, exponent = draw(cfg, "base"), cfg["exponent"]
+    return Problem(f"{base}{str(exponent).translate(SUPERSCRIPT)}", Fraction(base ** exponent))
+
+
+def root(cfg: Config) -> Problem:
+    radicand, degree = draw(cfg, "radicand"), cfg["degree"]
+    symbol = {2: "√", 3: "∛", 4: "∜"}.get(degree, f"{str(degree).translate(SUPERSCRIPT)}√")
+    value = radicand ** (1 / degree)
+    if round(value) ** degree == radicand:
+        return Problem(f"{symbol}{radicand}", Fraction(round(value)))
+    return Problem(f"{symbol}{radicand}", value, cfg["tolerance"] / 100)
+
+
+def percentage(cfg: Config) -> Problem:
+    percent, base = random.randint(1, 99), draw(cfg, "base")
+    return Problem(f"{percent}% of {base}", Fraction(percent * base, 100))
+
+
+def fraction(cfg: Config) -> Problem:
+    denominator = random.randint(2, cfg["max_denominator"])
+    numerator = random.randint(1, denominator - 1)
+    return Problem(f"{numerator}/{denominator}", numerator / denominator, cfg["tolerance"] / 100)
+
+
+def mixed(cfg: Config) -> Problem:
+    mode = MODES_BY_KEY[random.choice(cfg["modes"])]
+    return replace(mode.generate(mode.default_config()), tag=mode.tag)
+
+
+MODES = (
+    Mode("a", "addition", "add", chain("+", operator.add), operand_settings(3)),
+    Mode("s", "subtraction", "sub", chain("-", operator.sub), operand_settings(3)),
+    Mode("m", "multiplication", "mul", chain("×", operator.mul), operand_settings(2)),
+    Mode("d", "division", "div", division, (*digits("divisor", "the divisor", 1), *digits("quotient", "the quotient", 3))),
+    Mode("e", "exponents", "pow", power, (*digits("base", "the base", 2), Setting("exponent", "Exponent", 2))),
+    Mode("r", "roots", "root", root, (*digits("radicand", "the radicand", 3),
+                                      Setting("degree", "Root degree", 2, valid=lambda value, cfg: value >= 2),
+                                      tolerance(0.1))),
+    Mode("p", "percentages", "pct", percentage, digits("base", "the base", 3)),
+    Mode("f", "fractions to decimals", "frac", fraction,
+         (Setting("max_denominator", "Maximum denominator", 12, valid=lambda value, cfg: value >= 2), tolerance(0.1))),
+)
+MODES_BY_KEY = {mode.key: mode for mode in MODES}
+MODES += (
+    Mode("x", "mixed", "mixed", mixed,
+         (Setting("modes", "Modes to mix, e.g. \"mdr\"", "".join(MODES_BY_KEY), parse=str.strip,
+                  valid=lambda value, cfg: value != "" and all(c in MODES_BY_KEY for c in value)),)),
+)
+MODES_BY_KEY = {mode.key: mode for mode in MODES}
+
+
+# ---------------------------------------------------------------------------
+# I/O
+# ---------------------------------------------------------------------------
+
+def ask(setting: Setting, cfg: Config) -> object:
+    default = setting.default_for(cfg)
+    print(f"{setting.label} (default {default} if blank):")
+    raw = input("> ").strip()
+    print("")
+    if raw == "":
+        return default
+    try:
+        value = setting.parse(raw)
+        if setting.valid(value, cfg):
+            return value
+    except ValueError:
+        pass
+    print(f"Invalid input. Using default value of {default}.\n")
+    return default
+
+
+def save(response: Response) -> None:
+    session.append(response)
+    new_file = not RESPONSE_PATH.exists() or RESPONSE_PATH.stat().st_size == 0
+    with RESPONSE_PATH.open("a", newline="") as f:
+        writer = csv.writer(f)
+        if new_file:
+            writer.writerow(CSV_HEADER)
+        writer.writerow([response.problem_type, response.prompt, response.right_answer, response.user_answer,
+                         response.delay_seconds, response.timestamp, response.correct])
+
+
+def summarize() -> None:
+    if not session:
+        return
+    by_tag: dict[str, list[Response]] = defaultdict(list)
+    for response in session:
+        by_tag[response.problem_type].append(response)
+    print("\nSession summary:")
+    for tag, responses in by_tag.items():
+        right = sum(r.correct for r in responses)
+        avg = sum(r.delay_seconds for r in responses) / len(responses)
+        print(f"  {tag:<5} {right:>3}/{len(responses):<3} correct ({right / len(responses):.0%}), avg {avg:.2f}s")
+    print(f"Responses saved to {RESPONSE_PATH}")
+
+
+def drill(mode: Mode) -> None:
+    print(f"{mode.name.capitalize()} mode engaged!")
+    cfg: Config = {}
+    for setting in mode.settings:
+        cfg[setting.key] = ask(setting, cfg)
+
     while True:
-        operands = []
-        print("")
-        for _ in range(noperands):
-            digits = random.randint(min_digits, max_digits)
-            operands.append(rannum(digits))
-        problem = ' * '.join(map(str, operands))
-        right_answer = reduce(lambda x, y: x * y, operands)
-        print(f"> {problem} = ", end="")
-        start = time.time()
+        problem = mode.generate(cfg)
         timestamp = dt.datetime.now()
-        response = input()
-        if response == "back":
+        start = time.monotonic()
+        while True:
+            raw = input(f"> {problem.prompt} = ").strip()
+            if raw == "back":
+                return
+            if raw == "quit":
+                raise SystemExit(0)
+            if raw == "clear":
+                os.system("clear")
+                continue
+            try:
+                guess = parse_answer(raw)
+                break
+            except ValueError:
+                print("Invalid input. Try again.")
+        delay = time.monotonic() - start
+        correct = problem.check(guess)
+
+        save(Response(problem.tag or mode.tag, problem.prompt, fmt(problem.answer), raw, delay, timestamp, correct))
+        print(f"{delay:.2f}s | {fmt(problem.answer)} | {'✔✔✔' if correct else '𝔁𝔁𝔁'}\n")
+
+
+def menu() -> None:
+    while True:
+        print("Choose mode or type \"quit\". Available:")
+        for mode in MODES:
+            print(f"  * ({mode.key}) {mode.name}")
+        choice = input("> ").strip().lower()
+        if choice == "":
+            continue
+        if choice == "quit":
             return
-        elif response == "quit":
-            shutdown()
-        elif response == "clear":
+        if choice == "clear":
             os.system("clear")
             continue
-        try:
-            response = int(response)
-        except ValueError:
-            print("Invalid input. Let's try another problem...")
+        mode = MODES_BY_KEY.get(choice) or next((m for m in MODES if m.name.startswith(choice)), None)
+        if mode is None:
+            print("Invalid command\n")
             continue
-        end = time.time()
-        delay = end - start
-        correct = response == right_answer
-
-        all_responses.append(
-            Response("mul", problem, str(right_answer), str(response), delay, timestamp, correct))
-
-        print(f"{delay:.2f}s | {right_answer} | ", end="")
-
-        if correct:
-            print("✔✔✔")
-        else:
-            print("𝔁𝔁𝔁")
+        print("")
+        drill(mode)
+        print("")
 
 
-def division():
-    pass
+def main() -> None:
+    def terminate(signum, frame):
+        raise SystemExit(0)
 
-
-def addition():
-    pass
-
-
-def subtraction():
-    pass
-
-
-def main():
-    handle_signals()
+    signal.signal(signal.SIGTERM, terminate)  # kill / service-manager shutdown
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, terminate)
 
     try:
-        response = ""
-        while True:
-            try:
-                print("Choose mode or type \"quit\". Available:")
-                print("  * (m)ultiplication")
-                print("  * (d)ivision")
-                print("  * (a)ddition")
-                print("  * (s)ubtraction")
-                response = input("> ")
-            except EOFError:
-                shutdown()
-                break
-            while response == "":
-                response = input("> ")
-
-            print("")
-            command = response[0]
-            if command == "m":
-                multiplication()
-            elif command == "d":
-                division()
-            elif command == "a":
-                addition()
-            elif command == "s":
-                subtraction()
-            elif response == "clear":
-                os.system("clear")
-            elif response == "quit":
-                shutdown()
-            else:
-                print("Invalid command")
-                continue
+        menu()
+    except (KeyboardInterrupt, EOFError):
+        print("")
     finally:
-        shutdown()
+        summarize()
 
 
 if __name__ == "__main__":
